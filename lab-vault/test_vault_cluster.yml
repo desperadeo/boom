@@ -1,0 +1,34 @@
+---
+- name: Test Vault cluster status
+  hosts: vault_cluster
+  become: true
+  vars:
+    vault_bin: "/usr/local/bin/vault"
+  tasks:
+    - name: Check Vault status in JSON
+      command: "{{ vault_bin }} status -format=json"
+      register: vault_status
+      failed_when: vault_status.rc != 0
+      changed_when: false
+      environment:
+        VAULT_ADDR: "http://{{ ansible_host }}:8200"
+
+    - name: Parse Vault status
+      set_fact:
+        vault_status_parsed: "{{ vault_status.stdout | from_json }}"
+
+    - name: Assert Vault is unsealed
+      assert:
+        that:
+          - vault_status_parsed.sealed == false
+        fail_msg: "Vault is still sealed on {{ inventory_hostname }}!"
+        success_msg: "Vault is unsealed on {{ inventory_hostname }}"
+
+    - name: Show Vault node info
+      debug:
+        msg:
+          - "Node: {{ inventory_hostname }}"
+          - "HA enabled: {{ vault_status_parsed.ha_enabled }}"
+          - "HA mode: {{ vault_status_parsed.get('ha_mode', 'n/a') }}"
+          - "Cluster address: {{ vault_status_parsed.cluster_address | default('n/a') }}"
+          - "Version: {{ vault_status_parsed.version }}"

@@ -1,0 +1,19 @@
+---
+# ============================================================
+# Fichier : handlers/main.yml
+# Objectif :
+#   - Gérer le cycle de vie du service Vault
+#   - Rejouer l’unseal après chaque redémarrage
+# ============================================================
+
+- name: Restart Vault
+  systemd:
+    name: vault
+    state: restarted
+    daemon_reload: true
+  notify: Unseal Vault
+
+- name: Unseal Vault
+  include_tasks: init_unseal.yml
+  vars:
+    force_unseal_only: true

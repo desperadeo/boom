@@ -1,0 +1,24 @@
+vault_version: "1.20.2"
+vault_bin_dir: "/usr/local/bin"
+vault_data_dir: "/opt/vault/data"
+vault_config_dir: "/etc/vault.d"
+
+# Liste des IP du cluster
+cluster_nodes:
+  - "10.128.14.117"
+  - "10.128.14.118"
+  - "10.128.14.119"
+
+# Auto-init & auto-unseal
+vault_auto_init: true
+vault_key_shares: 5
+vault_key_threshold: 3
+
+# Où stocker les secrets sur le contrôleur Ansible (jamais sur les hôtes !)
+# Recommandé : chiffrer ces fichiers avec "ansible-vault encrypt"
+vault_secrets_dir_controller: "./vault_cluster_secrets"
+vault_keys_file: "{{ vault_secrets_dir_controller }}/unseal_keys.json"
+vault_root_token_file: "{{ vault_secrets_dir_controller }}/root_token.txt"
+
+# Disable privilege escalation when running delegated tasks on localhost
+vault_delegate_become: false

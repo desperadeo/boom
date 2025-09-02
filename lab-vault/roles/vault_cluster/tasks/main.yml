@@ -1,0 +1,69 @@
+---
+- name: Ensure unzip is installed
+  yum:
+    name: unzip
+    state: present
+
+- name: Create vault user
+  user:
+    name: vault
+    system: yes
+    shell: /sbin/nologin
+
+- name: Create Vault directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: vault
+    group: vault
+    mode: '0750'
+  loop:
+    - "{{ vault_data_dir }}"
+    - "{{ vault_config_dir }}"
+
+- name: Copy Vault binary archive
+  copy:
+    src: "vault_{{ vault_version }}_linux_amd64.zip"
+    dest: "/tmp/vault.zip"
+    mode: '0644'
+
+- name: Unzip Vault binary
+  unarchive:
+    src: "/tmp/vault.zip"
+    dest: "{{ vault_bin_dir }}"
+    remote_src: yes
+  notify: Restart Vault
+
+- name: Ensure vault binary permissions
+  file:
+    path: "{{ vault_bin_dir }}/vault"
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Copy Vault configuration
+  template:
+    src: "config.hcl.j2"
+    dest: "{{ vault_config_dir }}/config.hcl"
+    owner: vault
+    group: vault
+    mode: '0640'
+  notify: Restart Vault
+
+- name: Install systemd service
+  copy:
+    src: vault.service
+    dest: /etc/systemd/system/vault.service
+    mode: '0644'
+  notify: Restart Vault
+
+- name: Enable and start Vault
+  systemd:
+    name: vault
+    enabled: yes
+    state: started
+
+# --- Auto init & unseal (offline) ---
+- name: Initialize and unseal cluster (offline)
+  include_tasks: init_unseal.yml
+  when: vault_auto_init | bool

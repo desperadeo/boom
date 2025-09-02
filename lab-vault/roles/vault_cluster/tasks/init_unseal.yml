@@ -1,0 +1,180 @@
+---
+# ============================================================
+# Fichier : tasks/init_unseal.yml
+# Objectif :
+#   - Init + unseal (premier déploiement)
+#   - Unseal uniquement (quand handler "Restart Vault" notifie)
+# ============================================================
+
+# 1) Init cluster uniquement si ce n’est pas force_unseal_only
+- block:
+    # 1.1) Prépare le répertoire de secrets SUR LE CONTRÔLEUR
+    - name: Ensure secrets directory exists on controller
+      file:
+        path: "{{ vault_secrets_dir_controller }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      run_once: true
+      become: "{{ vault_delegate_become }}"
+
+    # 1.2) Vérifie l'état de chaque nœud
+    - name: Get Vault status (JSON)
+      command: "{{ vault_bin_dir }}/vault status -format=json"
+      register: vault_status
+      changed_when: false
+      failed_when: false
+      environment:
+        VAULT_ADDR: "http://{{ ansible_host }}:8200"
+
+    - name: Parse Vault status
+      set_fact:
+        vault_status_json: "{{ (vault_status.stdout | default('{}')) | from_json }}"
+        vault_initialized: "{{ (vault_status.stdout | default('{}') | from_json).initialized | default(false) }}"
+        vault_sealed: "{{ (vault_status.stdout | default('{}') | from_json).sealed | default(true) }}"
+
+    # 1.3) Détermine le leader actuel (ou init host)
+    - name: Choose init host
+      set_fact:
+        init_host: "{{ groups['vault_cluster'][0] }}"
+      run_once: true
+
+    - name: Check if cluster already initialized (init host)
+      command: "{{ vault_bin_dir }}/vault status -format=json"
+      register: init_status
+      changed_when: false
+      failed_when: false
+      environment:
+        VAULT_ADDR: "http://{{ hostvars[init_host].ansible_host }}:8200"
+      run_once: true
+
+    - name: Parse init status
+      set_fact:
+        cluster_initialized: "{{ (init_status.stdout | default('{}')) | from_json | json_query('initialized') | default(false) }}"
+      run_once: true
+
+    # 1.4) Initialise Vault sur le leader si nécessaire
+    - name: Initialize Vault cluster (only if not initialized)
+      command: >
+        {{ vault_bin_dir }}/vault operator init
+        -key-shares={{ vault_key_shares }}
+        -key-threshold={{ vault_key_threshold }}
+        -format=json
+      register: vault_init_result
+      no_log: true
+      environment:
+        VAULT_ADDR: "http://{{ hostvars[init_host].ansible_host }}:8200"
+      when: not cluster_initialized
+      run_once: true
+
+    # 1.5) Sauvegarde clés et token sur contrôleur
+    - name: Extract keys/token (controller)
+      set_fact:
+        vault_unseal_keys_b64: "{{ (vault_init_result.stdout | from_json).unseal_keys_b64 if (vault_init_result is defined) else omit }}"
+        vault_root_token: "{{ (vault_init_result.stdout | from_json).root_token if (vault_init_result is defined) else omit }}"
+      when: not cluster_initialized
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+      become: "{{ vault_delegate_become }}"
+
+    - name: Save unseal keys to controller
+      copy:
+        dest: "{{ vault_keys_file }}"
+        content: |
+          {{ {'unseal_keys_b64': vault_unseal_keys_b64, 'key_shares': vault_key_shares, 'key_threshold': vault_key_threshold } | to_nice_json }}
+        mode: '0600'
+      when: not cluster_initialized
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+      become: "{{ vault_delegate_become }}"
+
+    - name: Save root token to controller
+      copy:
+        dest: "{{ vault_root_token_file }}"
+        content: "{{ vault_root_token }}\n"
+        mode: '0600'
+      when: not cluster_initialized
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+      become: "{{ vault_delegate_become }}"
+
+  when: not (force_unseal_only | default(false) | bool)
+
+# 2) Récupère les clés depuis le fichier (toujours nécessaire pour unseal)
+- name: Load unseal keys from controller
+  slurp:
+    src: "{{ vault_keys_file }}"
+  register: keys_file
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  become: "{{ vault_delegate_become }}"
+
+- name: Share unseal keys with all hosts
+  set_fact:
+    unseal_keys_b64: "{{ (keys_file.content | b64decode | from_json).unseal_keys_b64 }}"
+    unseal_threshold: "{{ (keys_file.content | b64decode | from_json).key_threshold }}"
+  run_once: true
+  no_log: true
+
+# 3) Unseal leader
+- name: Unseal leader
+  command: "{{ vault_bin_dir }}/vault operator unseal {{ item }}"
+  loop: "{{ unseal_keys_b64[0:unseal_threshold|int] }}"
+  environment:
+    VAULT_ADDR: "http://{{ hostvars[init_host].ansible_host }}:8200"
+  no_log: true
+  run_once: true
+
+# 4) Attendre que le leader soit actif
+- name: Wait for leader to be active
+  command: "{{ vault_bin_dir }}/vault status -format=json"
+  register: leader_ready
+  retries: 20
+  delay: 3
+  until: >
+    leader_ready.stdout is defined and
+    (leader_ready.stdout | from_json).sealed == false
+  environment:
+    VAULT_ADDR: "http://{{ hostvars[init_host].ansible_host }}:8200"
+  run_once: true
+  changed_when: false
+
+# 5) Unseal autres nœuds
+- name: Unseal each node
+  command: "{{ vault_bin_dir }}/vault operator unseal {{ item }}"
+  loop: "{{ unseal_keys_b64[0:unseal_threshold|int] }}"
+  environment:
+    VAULT_ADDR: "http://{{ ansible_host }}:8200"
+  when: vault_sealed | bool
+  no_log: true
+
+# 6) Vérifie que chaque nœud est healthy
+- name: Wait for node to report healthy
+  command: "{{ vault_bin_dir }}/vault status -format=json"
+  register: node_ready
+  retries: 20
+  delay: 3
+  until: >
+    node_ready.stdout is defined and
+    (node_ready.stdout | from_json).sealed == false
+  environment:
+    VAULT_ADDR: "http://{{ ansible_host }}:8200"
+  changed_when: false
+
+# 7) Affiche résumé cluster (uniquement si on a fait un init)
+- name: Show cluster summary
+  debug:
+    msg:
+      - "Vault initialized: {{ cluster_initialized or (vault_init_result is defined) }}"
+      - "Key shares: {{ vault_key_shares }} / threshold: {{ vault_key_threshold }}"
+      - "Keys saved on controller: {{ vault_keys_file }}"
+      - "Root token saved on controller: {{ vault_root_token_file }}"
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  become: "{{ vault_delegate_become }}"
+  when: not (force_unseal_only | default(false) | bool)

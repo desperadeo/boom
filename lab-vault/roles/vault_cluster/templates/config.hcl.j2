@@ -1,0 +1,22 @@
+disable_mlock = true
+
+storage "raft" {
+  path    = "{{ vault_data_dir }}"
+  node_id = "{{ inventory_hostname }}"
+{% for node in cluster_nodes %}
+  retry_join {
+    leader_api_addr = "http://{{ node }}:8200"
+  }
+{% endfor %}
+}
+
+listener "tcp" {
+  address     = "0.0.0.0:8200"
+  cluster_address = "{{ ansible_host }}:8201"
+  tls_disable = 1
+}
+
+api_addr     = "http://{{ ansible_host }}:8200"
+cluster_addr = "http://{{ ansible_host }}:8201"
+ui           = true
+
